@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import argparse
 import hashlib
+import sys
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from utils import PROMPT
+
 from datasets import Dataset, concatenate_datasets, load_dataset
 
 SplitName = Literal["train", "validation", "test"]
 SPLITS: tuple[SplitName, ...] = ("train", "validation", "test")
-
-PROMPT = (
-    "Summarize the following document concisely.\n\n"
-    "Document:\n{document}\n\nSummary:"
-)
 
 
 def word_count(text: str) -> int:
@@ -50,6 +49,8 @@ def iqr_filter(ds: Dataset) -> tuple[Dataset, int]:
     )
     q1, q3 = np.quantile(ratios, [0.25, 0.75])
     iqr = q3 - q1
+    if iqr == 0:
+        return ds, 0
     keep_mask = (ratios >= q1 - 1.5 * iqr) & (ratios <= q3 + 1.5 * iqr)
     ds = ds.select(np.where(keep_mask)[0].tolist())
     return ds, before - len(ds)
@@ -70,11 +71,11 @@ def dedup(ds: Dataset) -> tuple[Dataset, int]:
 
 def add_prompt(example: dict) -> dict:
     example["prompt"] = PROMPT.format(document=example["document"])
-    example["text"] = example["prompt"] + example["summary"]
+    example["completion"] = example["summary"]
     return example
 
 
-def load_all_splits(datasets_dir: Path, limit: int | None) -> dict[SplitName, Dataset]:
+def load_all_splits(datasets_dir: Path) -> dict[SplitName, Dataset]:
     names = sorted(
         [
             c.name
@@ -100,24 +101,18 @@ def load_all_splits(datasets_dir: Path, limit: int | None) -> dict[SplitName, Da
             ds = load_dataset("parquet", data_files=str(path), split="train")
             if "source" not in ds.column_names:
                 ds = ds.add_column("source", [name] * len(ds))
-            if limit:
-                ds = ds.select(range(min(limit, len(ds))))
             parts.append(ds)
         if parts:
             result[split] = concatenate_datasets(parts)
     return result
 
 
-def process(
-    repo_root: Path,
-    dry_run: bool,
-    limit: int | None,
-) -> None:
+def process(repo_root: Path) -> None:
     datasets_dir = repo_root / "datasets"
     raw_dir = datasets_dir / "raw"
     processed_dir = datasets_dir / "processed"
 
-    splits = load_all_splits(raw_dir, limit)
+    splits = load_all_splits(raw_dir)
 
     if "train" in splits:
         train_hashes = {
@@ -152,34 +147,11 @@ def process(
             f"{split_name:<12} {raw:>7,}  -{n_hard:>5,}  -{n_iqr:>5,}  -{n_dup:>5,}  {len(ds):>7,}"
         )
 
-        if dry_run:
-            continue
-
         ds = ds.map(add_prompt, desc="format prompts")
         path = processed_dir / split_name / "data.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         ds.to_parquet(str(path))
         print(f"Saved {split_name} -> {path} ({len(ds)} rows)")
 
-    if dry_run:
-        print("\n[dry-run] no files written.")
-    else:
-        print(f"\nOutput: {processed_dir}")
 
-
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Process datasets for fine-tuning.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument(
-        "--repo-root", type=Path, default=Path(__file__).resolve().parents[1]
-    )
-    p.add_argument("--dry-run", action="store_true", help="Report only, no writes.")
-    p.add_argument("--limit-rows", type=int, default=None, metavar="N")
-    args = p.parse_args()
-    process(repo_root=args.repo_root, dry_run=args.dry_run, limit=args.limit_rows)
-
-
-if __name__ == "__main__":
-    main()
+process(repo_root=Path(__file__).resolve().parents[1])
