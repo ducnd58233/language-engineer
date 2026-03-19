@@ -40,6 +40,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
 
 SPLITS: tuple[SplitName, ...] = ("train", "validation", "test")
 
+
 def _normalize_text(value: str) -> str:
     normalized = re.compile(r"\s+").sub(" ", value).strip()
     return normalized
@@ -94,7 +95,7 @@ def prepare_datasets(*, repo_root: Path, limit_rows: int | None) -> None:
     os.environ["HF_HOME"] = str(cache_dir)
     os.environ["HF_DATASETS_CACHE"] = str(cache_dir / "datasets")
 
-    datasets_dir = repo_root / "datasets"
+    datasets_dir = repo_root / "datasets" / "raw"
 
     for split in SPLITS:
         for spec in DATASETS:
@@ -103,7 +104,7 @@ def prepare_datasets(*, repo_root: Path, limit_rows: int | None) -> None:
             if limit_rows is not None:
                 normalized = normalized.select(range(min(limit_rows, len(normalized))))
 
-            path=datasets_dir / spec.name / split / "data.parquet"
+            path = datasets_dir / spec.name / split / "data.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
             normalized.to_parquet(str(path))
 
