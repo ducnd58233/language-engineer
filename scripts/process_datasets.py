@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils import PROMPT
+from utils import format_example
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 
@@ -69,13 +69,6 @@ def dedup(ds: Dataset) -> tuple[Dataset, int]:
             keep.append(i)
     ds = ds.select(keep)
     return ds, before - len(ds)
-
-
-def add_prompt(example: dict) -> dict:
-    example["prompt"] = PROMPT.format(document=example["document"])
-    example["completion"] = example["summary"]
-    example["text"] = example["prompt"] + example["summary"]
-    return example
 
 
 def load_all_splits(datasets_dir: Path, num_proc: int = 1) -> dict[SplitName, Dataset]:
@@ -170,7 +163,7 @@ def process(
             f"{split_name:<12} {raw:>7,}  -{n_hard:>5,}  -{n_iqr:>5,}  -{n_dup:>5,}  {len(ds):>7,}"
         )
 
-        ds = ds.map(add_prompt, desc="format prompts", num_proc=num_proc)
+        ds = ds.map(format_example, desc="format prompts", num_proc=num_proc)
         out_dir = processed_dir / split_name
         out_dir.mkdir(parents=True, exist_ok=True)
         save_sharded(ds, out_dir, rows_per_shard=rows_per_shard, min_shards=min_shards)

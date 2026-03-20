@@ -17,11 +17,15 @@ os.environ.setdefault(
 sys.path.insert(0, str(Path(__file__).parent))
 
 import pyarrow.parquet as pq
+from dotenv import load_dotenv
+from huggingface_hub import HfApi
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTConfig, SFTTrainer
-from utils import build_bnb_config, load_config, load_tokenizer
+from utils import build_bnb_config, format_example, load_config, load_tokenizer
 
 from datasets import disable_caching, load_dataset
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 disable_caching()
 
@@ -78,6 +82,34 @@ def main() -> None:
     if args.epochs:
         t["num_train_epochs"] = args.epochs
 
+    push_to_hub = bool(t.get("push_to_hub", False))
+    hub_strategy = str(t.get("hub_strategy", "every_save"))
+    hub_private_repo = bool(t.get("hub_private_repo", False))
+    hub_model_id = t.get("hub_model_id") or os.environ.get("HF_REPO_ID")
+    hub_token = os.environ.get("HF_TOKEN")
+    hub_token_arg = hub_token if push_to_hub else None
+    hub_model_id_arg = str(hub_model_id) if (push_to_hub and hub_model_id) else None
+
+    if push_to_hub:
+        if not hub_model_id:
+            raise ValueError(
+                "push_to_hub is enabled but hub_model_id is missing. "
+                "Set `training.hub_model_id` in configs/lora_config.yaml "
+                "or `HF_REPO_ID` in the environment."
+            )
+        if not hub_token:
+            raise ValueError(
+                "push_to_hub is enabled but HF_TOKEN is not set in the "
+                "environment (see .env.example)."
+            )
+        api = HfApi(token=hub_token)
+        api.create_repo(
+            repo_id=str(hub_model_id),
+            repo_type="model",
+            exist_ok=True,
+            private=hub_private_repo,
+        )
+
     print(f"Loading tokenizer: {model_name}")
     tokenizer = load_tokenizer(model_name)
     tokenizer.model_max_length = cfg["model"]["max_seq_length"]
@@ -116,12 +148,18 @@ def main() -> None:
     train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat(
         t["num_train_epochs"]
     )
+    train_ds = train_ds.map(
+        format_example, remove_columns=["document", "summary", "source"]
+    )
 
     val_ds = load_dataset(
         "parquet",
         data_files=[str(p) for p in val_shards],
         split="train",
         streaming=True,
+    )
+    val_ds = val_ds.map(
+        format_example, remove_columns=["document", "summary", "source"]
     )
 
     num_rows = sum(pq.ParquetFile(str(p)).metadata.num_rows for p in train_shards)
@@ -161,6 +199,11 @@ def main() -> None:
         load_best_model_at_end=t["load_best_model_at_end"],
         metric_for_best_model=t["metric_for_best_model"],
         report_to=t["report_to"],
+        push_to_hub=push_to_hub,
+        hub_strategy=hub_strategy,
+        hub_model_id=hub_model_id_arg,
+        hub_private_repo=hub_private_repo,
+        hub_token=hub_token_arg,
     )
     resume_cfg = t.get("resume", {})
     if resume_cfg.get("enabled"):
@@ -189,6 +232,22 @@ def main() -> None:
     trainer.model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     print(f"Adapter saved to {output_dir}")
+
+    if push_to_hub:
+        print("Pushing final adapter to HuggingFace Hub...")
+        commit_info = trainer.push_to_hub(
+            commit_message=(
+                "Final QLoRA adapter: Qwen2.5-3B-Instruct for English summarization "
+                "(CNN/DailyMail + XSum)"
+            ),
+            tags=["peft", "lora", "qlora", "text-summarization", "qwen2"],
+            language=["en"],
+            finetuned_from=model_name,
+            tasks=["summarization"],
+            dataset_tags=["cnn_dailymail", "xsum"],
+            dataset=["cnn_dailymail", "xsum"],
+        )
+        print(f"Adapter pushed → {commit_info}")
 
 
 if __name__ == "__main__":

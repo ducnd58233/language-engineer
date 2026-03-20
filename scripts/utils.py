@@ -16,6 +16,11 @@ _CHUNK_SIZE = 2048
 _CHUNK_OVERLAP = 256
 
 
+def format_example(example: dict) -> dict:
+    example["text"] = PROMPT.format(document=example["document"]) + example["summary"]
+    return example
+
+
 def load_config(path: Path) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
