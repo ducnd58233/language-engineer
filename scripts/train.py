@@ -93,7 +93,7 @@ def main(args: argparse.Namespace) -> None:
         "parquet", data_files=str(train_path), split="train", streaming=True
     )
     train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
-    train_ds = train_ds.shuffle(buffer_size=10_000, seed=42)
+    train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat()
 
     val_ds = load_dataset(
         "parquet", data_files=str(val_path), split="train", streaming=True
