@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import os
 import sys
 from pathlib import Path
 from typing import Literal
@@ -21,7 +23,7 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
-def hard_filter(ds: Dataset) -> tuple[Dataset, int]:
+def hard_filter(ds: Dataset, num_proc: int = 1) -> tuple[Dataset, int]:
     before = len(ds)
 
     def keep(ex: dict) -> bool:
@@ -35,7 +37,7 @@ def hard_filter(ds: Dataset) -> tuple[Dataset, int]:
             return False
         return True
 
-    ds = ds.filter(keep, desc="hard filter")
+    ds = ds.filter(keep, desc="hard filter", num_proc=num_proc)
     return ds, before - len(ds)
 
 
@@ -76,7 +78,7 @@ def add_prompt(example: dict) -> dict:
     return example
 
 
-def load_all_splits(datasets_dir: Path) -> dict[SplitName, Dataset]:
+def load_all_splits(datasets_dir: Path, num_proc: int = 1) -> dict[SplitName, Dataset]:
     names = sorted(
         [
             c.name
@@ -99,7 +101,9 @@ def load_all_splits(datasets_dir: Path) -> dict[SplitName, Dataset]:
             path = datasets_dir / name / split / "data.parquet"
             if not path.exists():
                 continue
-            ds = load_dataset("parquet", data_files=str(path), split="train")
+            ds = load_dataset(
+                "parquet", data_files=str(path), split="train", num_proc=num_proc
+            )
             if "source" not in ds.column_names:
                 ds = ds.add_column("source", [name] * len(ds))
             parts.append(ds)
@@ -108,12 +112,30 @@ def load_all_splits(datasets_dir: Path) -> dict[SplitName, Dataset]:
     return result
 
 
-def process(repo_root: Path) -> None:
+def save_sharded(
+    ds: Dataset, out_dir: Path, rows_per_shard: int, min_shards: int
+) -> None:
+    total = len(ds)
+    n = max(math.ceil(total / rows_per_shard), min_shards)
+    shard_size = math.ceil(total / n)
+    for i in range(n):
+        chunk = ds.select(range(i * shard_size, min((i + 1) * shard_size, total)))
+        fname = out_dir / f"data-{i:05d}-of-{n:05d}.parquet"
+        chunk.to_parquet(str(fname))
+    print(f"Saved {out_dir.name} -> {out_dir} ({total} rows, {n} shards)")
+
+
+def process(
+    repo_root: Path, rows_per_shard: int = 100_000, min_shards: int = 1
+) -> None:
+    num_proc = os.cpu_count() or 1
+    print(f"Using num_proc={num_proc}")
+
     datasets_dir = repo_root / "datasets"
     raw_dir = datasets_dir / "raw"
     processed_dir = datasets_dir / "processed"
 
-    splits = load_all_splits(raw_dir)
+    splits = load_all_splits(raw_dir, num_proc=num_proc)
 
     if "train" in splits:
         train_hashes = {
@@ -140,7 +162,7 @@ def process(repo_root: Path) -> None:
 
     for split_name, ds in splits.items():
         raw = len(ds)
-        ds, n_hard = hard_filter(ds)
+        ds, n_hard = hard_filter(ds, num_proc=num_proc)
         ds, n_iqr = iqr_filter(ds)
         ds, n_dup = dedup(ds)
 
@@ -148,12 +170,31 @@ def process(repo_root: Path) -> None:
             f"{split_name:<12} {raw:>7,}  -{n_hard:>5,}  -{n_iqr:>5,}  -{n_dup:>5,}  {len(ds):>7,}"
         )
 
-        ds = ds.map(add_prompt, desc="format prompts")
-        path = processed_dir / split_name / "data.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        ds.to_parquet(str(path))
-        print(f"Saved {split_name} -> {path} ({len(ds)} rows)")
+        ds = ds.map(add_prompt, desc="format prompts", num_proc=num_proc)
+        out_dir = processed_dir / split_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_sharded(ds, out_dir, rows_per_shard=rows_per_shard, min_shards=min_shards)
 
 
 if __name__ == "__main__":
-    process(repo_root=Path(__file__).resolve().parents[1])
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--rows-per-shard",
+        type=int,
+        default=100_000,
+        help="Target number of rows per output parquet shard (default: 100000)",
+    )
+    parser.add_argument(
+        "--min-shards",
+        type=int,
+        default=1,
+        help="Minimum number of shards regardless of row count (default: 1)",
+    )
+    args = parser.parse_args()
+    process(
+        repo_root=Path(__file__).resolve().parents[1],
+        rows_per_shard=args.rows_per_shard,
+        min_shards=args.min_shards,
+    )

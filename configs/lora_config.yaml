@@ -9,7 +9,7 @@ quantization:
   bnb_4bit_use_double_quant: true
 
 lora:
-  r: 8
+  r: 16
   lora_alpha: 32
   lora_dropout: 0.05
   bias: "none"
@@ -19,9 +19,9 @@ lora:
     - k_proj
     - v_proj
     - o_proj
-    # - gate_proj
-    # - up_proj
-    # - down_proj
+    - gate_proj
+    - up_proj
+    - down_proj
 
 training:
   num_train_epochs: 10
@@ -35,6 +35,7 @@ training:
   weight_decay: 0.01
   bf16: true
   logging_steps: 50
+  packing: true
   dataloader_num_workers: 0
   dataloader_pin_memory: true
   eval_strategy: "steps"
@@ -52,6 +53,7 @@ training:
     auto_latest: true
 
 data:
-  train_parquet: "datasets/processed/train/data.parquet"
-  validation_parquet: "datasets/processed/validation/data.parquet"
-  test_parquet: "datasets/processed/test/data.parquet"
+  train_dir: "datasets/processed/train"
+  validation_dir: "datasets/processed/validation"
+  test_dir: "datasets/processed/test"
+  rows_per_shard: 100000  # ~rows per parquet shard; num_shards = max(ceil(total/this), dataloader_num_workers)

@@ -88,9 +88,16 @@ def main(args: argparse.Namespace) -> None:
     model_name = args.model or cfg["model"]["base_model"]
     bnb_cfg = build_bnb_config(cfg)
 
-    test_path = repo_root / cfg["data"]["test_parquet"]
-    print(f"Loading test data from {test_path}")
-    test_ds = load_dataset("parquet", data_files=str(test_path), split="train")
+    test_dir = repo_root / cfg["data"]["test_dir"]
+    test_shards = sorted(test_dir.glob("*.parquet"))
+    if not test_shards:
+        raise FileNotFoundError(
+            f"No parquet shards found in {test_dir}. Run process_datasets.py first."
+        )
+    print(f"Loading test data from {test_dir} ({len(test_shards)} shards)")
+    test_ds = load_dataset(
+        "parquet", data_files=[str(p) for p in test_shards], split="train"
+    )
     test_ds = test_ds.select(range(min(args.n_samples, len(test_ds))))
     documents = test_ds["document"]
     references = test_ds["summary"]

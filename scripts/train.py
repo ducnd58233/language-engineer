@@ -66,11 +66,17 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
+    parser.add_argument(
+        "--epochs", type=int, default=None, help="Override number of training epochs"
+    )
     args = parser.parse_args()
 
     model_name = args.model or cfg["model"]["base_model"]
     t = cfg["training"]
     d = cfg["data"]
+
+    if args.epochs:
+        t["num_train_epochs"] = args.epochs
 
     print(f"Loading tokenizer: {model_name}")
     tokenizer = load_tokenizer(model_name)
@@ -91,23 +97,35 @@ def main() -> None:
     model.print_trainable_parameters()
 
     print("Loading datasets...")
-    train_path = repo_root / d["train_parquet"]
-    val_path = repo_root / d["validation_parquet"]
+    train_dir = repo_root / d["train_dir"]
+    val_dir = repo_root / d["validation_dir"]
+
+    train_shards = sorted(train_dir.glob("*.parquet"))
+    val_shards = sorted(val_dir.glob("*.parquet"))
+    if not train_shards:
+        raise FileNotFoundError(
+            f"No parquet shards found in {train_dir}. Run process_datasets.py first."
+        )
 
     train_ds = load_dataset(
-        "parquet", data_files=str(train_path), split="train", streaming=True
+        "parquet",
+        data_files=[str(p) for p in train_shards],
+        split="train",
+        streaming=True,
     )
-    train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
     train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat(
         t["num_train_epochs"]
     )
 
     val_ds = load_dataset(
-        "parquet", data_files=str(val_path), split="train", streaming=True
+        "parquet",
+        data_files=[str(p) for p in val_shards],
+        split="train",
+        streaming=True,
     )
-    val_ds = val_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
 
-    num_rows = pq.ParquetFile(train_path).metadata.num_rows
+    num_rows = sum(pq.ParquetFile(str(p)).metadata.num_rows for p in train_shards)
+    print(f"Train shards: {len(train_shards)}, val shards: {len(val_shards)}")
     steps_per_epoch = math.ceil(
         num_rows / (t["per_device_train_batch_size"] * t["gradient_accumulation_steps"])
     )
@@ -116,17 +134,20 @@ def main() -> None:
         f"Training: {num_rows} rows x {t['num_train_epochs']} epochs = {max_steps} steps"
     )
 
+    warmup_steps = max(1, int(t.get("warmup_ratio", 0.03) * max_steps))
+
     sft_cfg = SFTConfig(
         output_dir=str(repo_root / _run_dir(model_name)),
         dataset_text_field="text",
         max_steps=max_steps,
+        packing=t.get("packing", False),
         per_device_train_batch_size=t["per_device_train_batch_size"],
         per_device_eval_batch_size=t["per_device_eval_batch_size"],
         gradient_accumulation_steps=t["gradient_accumulation_steps"],
         gradient_checkpointing=t["gradient_checkpointing"],
         learning_rate=t["learning_rate"],
         lr_scheduler_type=t["lr_scheduler_type"],
-        warmup_ratio=t["warmup_ratio"],
+        warmup_steps=warmup_steps,
         weight_decay=t["weight_decay"],
         bf16=t["bf16"],
         logging_steps=t["logging_steps"],
@@ -148,8 +169,6 @@ def main() -> None:
         )
         if checkpoint_path:
             sft_cfg.resume_from_checkpoint = checkpoint_path
-        else:
-            sft_cfg.resume_from_checkpoint = resume_cfg.get("auto_latest", True)
 
     trainer = SFTTrainer(
         model=model,
@@ -160,16 +179,11 @@ def main() -> None:
     )
 
     print("Training...")
-    try:
-        if sft_cfg.resume_from_checkpoint:
-            print(f"Resuming from checkpoint: {sft_cfg.resume_from_checkpoint}")
-            trainer.train(resume_from_checkpoint=sft_cfg.resume_from_checkpoint)
-        else:
-            print("Training from scratch")
-            trainer.train()
-    except Exception as e:
-        print(f"Error resuming from checkpoint: {e}")
-        trainer.train()
+    if sft_cfg.resume_from_checkpoint:
+        print(f"Resuming from checkpoint: {sft_cfg.resume_from_checkpoint}")
+    else:
+        print("Training from scratch")
+    trainer.train(resume_from_checkpoint=sft_cfg.resume_from_checkpoint or False)
 
     output_dir = repo_root / _run_dir(model_name) / "final"
     trainer.model.save_pretrained(str(output_dir))
