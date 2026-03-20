@@ -86,11 +86,16 @@ def main(args: argparse.Namespace) -> None:
         "parquet", data_files=str(repo_root / d["validation_parquet"]), split="train"
     )
 
+    if "text" not in train_ds.column_names:
+        train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
+        val_ds = val_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
+
     max_steps = args.max_steps if args.max_steps > 0 else -1
 
     sft_cfg = SFTConfig(
         output_dir=str(repo_root / t["output_dir"]),
-        max_length=cfg["model"]["max_seq_length"],
+        dataset_text_field="text",
+        max_seq_length=cfg["model"]["max_seq_length"],
         num_train_epochs=t["num_train_epochs"],
         max_steps=max_steps,
         per_device_train_batch_size=t["per_device_train_batch_size"],

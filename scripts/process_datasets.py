@@ -72,6 +72,7 @@ def dedup(ds: Dataset) -> tuple[Dataset, int]:
 def add_prompt(example: dict) -> dict:
     example["prompt"] = PROMPT.format(document=example["document"])
     example["completion"] = example["summary"]
+    example["text"] = example["prompt"] + example["summary"]
     return example
 
 
@@ -154,4 +155,5 @@ def process(repo_root: Path) -> None:
         print(f"Saved {split_name} -> {path} ({len(ds)} rows)")
 
 
-process(repo_root=Path(__file__).resolve().parents[1])
+if __name__ == "__main__":
+    process(repo_root=Path(__file__).resolve().parents[1])

@@ -36,7 +36,7 @@ training:
   weight_decay: 0.01
   bf16: true
   logging_steps: 50
-  dataloader_num_workers: 4
+  dataloader_num_workers: 0
   dataloader_pin_memory: true
   eval_strategy: "steps"
   eval_steps: 100

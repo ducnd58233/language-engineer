@@ -13,3 +13,4 @@ wheels/
 .hf-cache
 datasets
 runs
+.env
