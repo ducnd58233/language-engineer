@@ -54,6 +54,7 @@ def load_model(
         quantization_config=bnb_cfg,
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation="sdpa",
     )
     if adapter_path and Path(adapter_path).exists():
         model = PeftModel.from_pretrained(model, adapter_path)

@@ -17,6 +17,7 @@ os.environ.setdefault(
 sys.path.insert(0, str(Path(__file__).parent))
 
 import pyarrow.parquet as pq
+import torch
 from dotenv import load_dotenv
 from huggingface_hub import HfApi
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -110,9 +111,11 @@ def main() -> None:
             private=hub_private_repo,
         )
 
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     print(f"Loading tokenizer: {model_name}")
     tokenizer = load_tokenizer(model_name)
-    tokenizer.model_max_length = cfg["model"]["max_seq_length"]
 
     from transformers import AutoModelForCausalLM
 
@@ -122,6 +125,7 @@ def main() -> None:
         quantization_config=build_bnb_config(cfg),
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation="sdpa",
     )
     model = prepare_model_for_kbit_training(model)
     model = get_peft_model(model, build_lora_config(cfg))
@@ -177,6 +181,7 @@ def main() -> None:
     sft_cfg = SFTConfig(
         output_dir=str(repo_root / _run_dir(model_name)),
         dataset_text_field="text",
+        max_length=cfg["model"]["max_seq_length"],
         max_steps=max_steps,
         packing=t.get("packing", False),
         per_device_train_batch_size=t["per_device_train_batch_size"],
@@ -204,6 +209,8 @@ def main() -> None:
         hub_model_id=hub_model_id_arg,
         hub_private_repo=hub_private_repo,
         hub_token=hub_token_arg,
+        gradient_checkpointing_kwargs=t.get("gradient_checkpointing_kwargs", {}),
+        optim=t.get("optim", "paged_adamw_8bit"),
     )
     resume_cfg = t.get("resume", {})
     if resume_cfg.get("enabled"):
