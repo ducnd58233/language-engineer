@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ os.environ.setdefault(
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import pyarrow.parquet as pq
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTConfig, SFTTrainer
 from utils import build_bnb_config, load_config, load_tokenizer
@@ -53,11 +55,15 @@ def build_lora_config(cfg: dict) -> LoraConfig:
     )
 
 
+def _run_dir(model_name: str) -> str:
+    return "runs/" + model_name.split("/")[-1] + "_qlora"
+
+
 def main(args: argparse.Namespace) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
 
-    model_name = cfg["model"]["base_model"]
+    model_name = args.model or cfg["model"]["base_model"]
     t = cfg["training"]
     d = cfg["data"]
 
@@ -80,23 +86,36 @@ def main(args: argparse.Namespace) -> None:
     model.print_trainable_parameters()
 
     print("Loading datasets...")
+    train_path = repo_root / d["train_parquet"]
+    val_path = repo_root / d["validation_parquet"]
+
     train_ds = load_dataset(
-        "parquet", data_files=str(repo_root / d["train_parquet"]), split="train"
+        "parquet", data_files=str(train_path), split="train", streaming=True
     )
+    train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
+    train_ds = train_ds.shuffle(buffer_size=10_000, seed=42)
+
     val_ds = load_dataset(
-        "parquet", data_files=str(repo_root / d["validation_parquet"]), split="train"
+        "parquet", data_files=str(val_path), split="train", streaming=True
     )
+    val_ds = val_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
 
-    if "text" not in train_ds.column_names:
-        train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
-        val_ds = val_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
-
-    max_steps = args.max_steps if args.max_steps > 0 else -1
+    if args.max_steps > 0:
+        max_steps = args.max_steps
+    else:
+        num_rows = pq.ParquetFile(train_path).metadata.num_rows
+        steps_per_epoch = math.ceil(
+            num_rows
+            / (t["per_device_train_batch_size"] * t["gradient_accumulation_steps"])
+        )
+        max_steps = steps_per_epoch * t["num_train_epochs"]
+        print(
+            f"Auto max_steps: {num_rows} rows → {max_steps} steps ({t['num_train_epochs']} epochs)"
+        )
 
     sft_cfg = SFTConfig(
-        output_dir=str(repo_root / t["output_dir"]),
+        output_dir=str(repo_root / _run_dir(model_name)),
         dataset_text_field="text",
-        num_train_epochs=t["num_train_epochs"],
         max_steps=max_steps,
         per_device_train_batch_size=t["per_device_train_batch_size"],
         per_device_eval_batch_size=t["per_device_eval_batch_size"],
@@ -122,7 +141,7 @@ def main(args: argparse.Namespace) -> None:
     resume_cfg = t.get("resume", {})
     if resume_cfg.get("enabled"):
         checkpoint_path = resume_cfg.get("checkpoint_path") or get_latest_checkpoint(
-            repo_root / t["output_dir"]
+            repo_root / _run_dir(model_name)
         )
         if checkpoint_path:
             sft_cfg.resume_from_checkpoint = checkpoint_path
@@ -149,7 +168,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"Error resuming from checkpoint: {e}")
         trainer.train()
 
-    output_dir = repo_root / t["output_dir"] / "final"
+    output_dir = repo_root / _run_dir(model_name) / "final"
     trainer.model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     print(f"Adapter saved to {output_dir}")
@@ -161,6 +180,7 @@ if __name__ == "__main__":
         "--max-steps",
         type=int,
         default=0,
-        help="Override max training steps (0 = use epochs)",
+        help="Override max training steps (0 = auto-compute from dataset size × epochs)",
     )
+    parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
     main(parser.parse_args())

@@ -16,10 +16,14 @@ from utils import (
 )
 
 
+def _run_dir(model_name: str) -> str:
+    return "runs/" + model_name.split("/")[-1] + "_qlora"
+
+
 def main(args: argparse.Namespace) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
-    model_name = cfg["model"]["base_model"]
+    model_name = args.model or cfg["model"]["base_model"]
 
     if args.input:
         document = Path(args.input).read_text(encoding="utf-8").strip()
@@ -30,9 +34,7 @@ def main(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     tokenizer = load_tokenizer(model_name)
-    adapter_path = args.adapter or str(
-        repo_root / cfg["training"]["output_dir"] / "final"
-    )
+    adapter_path = args.adapter or str(repo_root / _run_dir(model_name) / "final")
     model = load_model(model_name, build_bnb_config(cfg), adapter_path=adapter_path)
 
     tokens_in = len(tokenizer(document, add_special_tokens=False)["input_ids"])
@@ -74,4 +76,5 @@ if __name__ == "__main__":
     parser.add_argument(
         "--adapter", default="", help="Path to LoRA adapter (runs/<model>_qlora/final)"
     )
+    parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
     main(parser.parse_args())

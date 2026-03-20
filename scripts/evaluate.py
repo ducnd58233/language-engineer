@@ -78,10 +78,14 @@ def print_table(results: dict) -> None:
     print("=" * 52)
 
 
+def _run_dir(model_name: str) -> str:
+    return "runs/" + model_name.split("/")[-1] + "_qlora"
+
+
 def main(args: argparse.Namespace) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
-    model_name = cfg["model"]["base_model"]
+    model_name = args.model or cfg["model"]["base_model"]
     bnb_cfg = build_bnb_config(cfg)
 
     test_path = repo_root / cfg["data"]["test_parquet"]
@@ -104,9 +108,7 @@ def main(args: argparse.Namespace) -> None:
     del base_model
     torch.cuda.empty_cache()
 
-    adapter_path = args.adapter or str(
-        repo_root / cfg["training"]["output_dir"] / "final"
-    )
+    adapter_path = args.adapter or str(repo_root / _run_dir(model_name) / "final")
     print(f"\n--- Evaluating adapter: {adapter_path} ---")
     adapter_model = load_model(model_name, bnb_cfg, adapter_path=adapter_path)
     results["adapter"] = evaluate(
@@ -130,4 +132,5 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n-samples", type=int, default=500, help="Number of test samples to evaluate"
     )
+    parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
     main(parser.parse_args())
