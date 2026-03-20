@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import math
 import os
 import sys
@@ -59,9 +58,15 @@ def _run_dir(model_name: str) -> str:
     return "runs/" + model_name.split("/")[-1] + "_qlora"
 
 
-def main(args: argparse.Namespace) -> None:
+def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
+
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
+    args = parser.parse_args()
 
     model_name = args.model or cfg["model"]["base_model"]
     t = cfg["training"]
@@ -93,25 +98,23 @@ def main(args: argparse.Namespace) -> None:
         "parquet", data_files=str(train_path), split="train", streaming=True
     )
     train_ds = train_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
-    train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat()
+    train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat(
+        t["num_train_epochs"]
+    )
 
     val_ds = load_dataset(
         "parquet", data_files=str(val_path), split="train", streaming=True
     )
     val_ds = val_ds.map(lambda x: {"text": x["prompt"] + x["completion"]})
 
-    if args.max_steps > 0:
-        max_steps = args.max_steps
-    else:
-        num_rows = pq.ParquetFile(train_path).metadata.num_rows
-        steps_per_epoch = math.ceil(
-            num_rows
-            / (t["per_device_train_batch_size"] * t["gradient_accumulation_steps"])
-        )
-        max_steps = steps_per_epoch * t["num_train_epochs"]
-        print(
-            f"Auto max_steps: {num_rows} rows → {max_steps} steps ({t['num_train_epochs']} epochs)"
-        )
+    num_rows = pq.ParquetFile(train_path).metadata.num_rows
+    steps_per_epoch = math.ceil(
+        num_rows / (t["per_device_train_batch_size"] * t["gradient_accumulation_steps"])
+    )
+    max_steps = steps_per_epoch * t["num_train_epochs"]
+    print(
+        f"Training: {num_rows} rows x {t['num_train_epochs']} epochs = {max_steps} steps"
+    )
 
     sft_cfg = SFTConfig(
         output_dir=str(repo_root / _run_dir(model_name)),
@@ -175,12 +178,4 @@ def main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=0,
-        help="Override max training steps (0 = auto-compute from dataset size × epochs)",
-    )
-    parser.add_argument("--model", default="", help="Override base model (HF repo ID)")
-    main(parser.parse_args())
+    main()
