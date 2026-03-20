@@ -63,6 +63,7 @@ def main(args: argparse.Namespace) -> None:
 
     print(f"Loading tokenizer: {model_name}")
     tokenizer = load_tokenizer(model_name)
+    tokenizer.model_max_length = cfg["model"]["max_seq_length"]
 
     from transformers import AutoModelForCausalLM
 
@@ -95,7 +96,6 @@ def main(args: argparse.Namespace) -> None:
     sft_cfg = SFTConfig(
         output_dir=str(repo_root / t["output_dir"]),
         dataset_text_field="text",
-        max_length=cfg["model"]["max_seq_length"],
         num_train_epochs=t["num_train_epochs"],
         max_steps=max_steps,
         per_device_train_batch_size=t["per_device_train_batch_size"],
