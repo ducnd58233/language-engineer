@@ -138,10 +138,15 @@ def main(args: argparse.Namespace) -> None:
     )
 
     print("Training...")
-    if sft_cfg.resume_from_checkpoint:
-        print(f"Resuming from checkpoint: {sft_cfg.resume_from_checkpoint}")
-        trainer.train(resume_from_checkpoint=sft_cfg.resume_from_checkpoint)
-    else:
+    try:
+        if sft_cfg.resume_from_checkpoint:
+            print(f"Resuming from checkpoint: {sft_cfg.resume_from_checkpoint}")
+            trainer.train(resume_from_checkpoint=sft_cfg.resume_from_checkpoint)
+        else:
+            print("Training from scratch")
+            trainer.train()
+    except Exception as e:
+        print(f"Error resuming from checkpoint: {e}")
         trainer.train()
 
     output_dir = repo_root / t["output_dir"] / "final"
