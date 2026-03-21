@@ -48,7 +48,7 @@ training:
   metric_for_best_model: "eval_loss"
   report_to: "none"
   push_to_hub: true
-  hub_strategy: "every_save"
+  hub_strategy: "checkpoint"
   hub_private_repo: false
   hub_model_id: null
 

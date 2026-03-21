@@ -219,6 +219,23 @@ def main() -> None:
         )
         if checkpoint_path:
             sft_cfg.resume_from_checkpoint = checkpoint_path
+            print(f"Resuming from local checkpoint: {checkpoint_path}")
+        elif push_to_hub and hub_model_id:
+            from huggingface_hub import snapshot_download
+
+            print(f"No local checkpoint — downloading from Hub: {hub_model_id}")
+            hub_local = repo_root / _run_dir(model_name) / "hub_checkpoint"
+            snapshot_download(
+                repo_id=hub_model_id,
+                local_dir=str(hub_local),
+                token=os.environ.get("HF_TOKEN"),
+            )
+            checkpoint_subdir = hub_local / "last-checkpoint"
+            if checkpoint_subdir.exists():
+                sft_cfg.resume_from_checkpoint = str(checkpoint_subdir)
+                print(f"Resuming from Hub checkpoint: {checkpoint_subdir}")
+            else:
+                print("Hub repo has no last-checkpoint/ — starting from scratch")
 
     trainer = SFTTrainer(
         model=model,
