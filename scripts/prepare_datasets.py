@@ -23,19 +23,26 @@ class DatasetSpec:
 
 DATASETS: tuple[DatasetSpec, ...] = (
     DatasetSpec(
+        name="booksum",
+        hf_path="kmfoda/booksum",
+        hf_config=None,
+        document_column="chapter",
+        summary_column="summary_text",
+    ),
+    DatasetSpec(
         name="cnn",
         hf_path="cnn_dailymail",
         hf_config="3.0.0",
         document_column="article",
         summary_column="highlights",
     ),
-    DatasetSpec(
-        name="xsum",
-        hf_path="xsum",
-        hf_config=None,
-        document_column="document",
-        summary_column="summary",
-    ),
+    # DatasetSpec(
+    #     name="xsum",
+    #     hf_path="xsum",
+    #     hf_config=None,
+    #     document_column="document",
+    #     summary_column="summary",
+    # ),
 )
 
 SPLITS: tuple[SplitName, ...] = ("train", "validation", "test")

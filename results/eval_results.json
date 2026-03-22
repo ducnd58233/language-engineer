@@ -1,0 +1,16 @@
+{
+  "base": {
+    "rouge1": 0.3079,
+    "rouge2": 0.1256,
+    "rougeL": 0.2057,
+    "bleu4": 5.38,
+    "bertscore_f1": 0.8819
+  },
+  "adapter": {
+    "rouge1": 0.3597,
+    "rouge2": 0.1479,
+    "rougeL": 0.2526,
+    "bleu4": 9.42,
+    "bertscore_f1": 0.8872
+  }
+}

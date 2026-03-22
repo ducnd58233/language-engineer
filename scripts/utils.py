@@ -12,12 +12,42 @@ PROMPT = (
     "Document:\n{document}\n\nSummary:\n"
 )
 
-_CHUNK_SIZE = 2048
-_CHUNK_OVERLAP = 256
+CHUNK_PROMPT = (
+    "From the following passage, extract only specific facts, discoveries, events, "
+    "and named entities that are unique to this section. "
+    "Skip any repeated descriptions, standard setting details, or boilerplate phrasing. "
+    "Be concise and factual.\n\n"
+    "Passage:\n{document}\n\nKey facts:\n"
+)
+
+REFINE_PROMPT = (
+    "You have the following summary so far:\n{existing_summary}\n\n"
+    "New section:\n{document}\n\n"
+    "Update the summary to incorporate any new information from this section. "
+    "Keep all previously captured facts. Add new entities, events, and discoveries. "
+    "Avoid repeating information already in the summary.\n\nUpdated summary:\n"
+)
+
+REFINE_TOKENS = 1024
+MIN_SUMMARY_TOKENS = 512
 
 
-def format_example(example: dict) -> dict:
-    example["text"] = PROMPT.format(document=example["document"]) + example["summary"]
+def format_example(example: dict, tokenizer=None, max_seq_length: int = 0) -> dict:
+    document = example["document"]
+    if tokenizer and max_seq_length:
+        prompt_len = len(
+            tokenizer(PROMPT.format(document=""), add_special_tokens=False)["input_ids"]
+        )
+        summary_len = len(
+            tokenizer(example["summary"], add_special_tokens=False)["input_ids"]
+        )
+        doc_budget = (
+            max_seq_length - prompt_len - summary_len - 2
+        )  # 2 for eos and pad tokens
+        doc_ids = tokenizer(document, add_special_tokens=False)["input_ids"]
+        if 0 < doc_budget < len(doc_ids):
+            document = tokenizer.decode(doc_ids[:doc_budget], skip_special_tokens=True)
+    example["text"] = PROMPT.format(document=document) + example["summary"]
     return example
 
 
@@ -62,10 +92,42 @@ def load_model(
     return model
 
 
-def generate_summary(model, tokenizer, document: str, max_new_tokens: int = 150) -> str:
-    prompt = PROMPT.format(document=document)
+def run_dir(model_name: str) -> str:
+    return "runs/" + model_name.split("/")[-1] + "_qlora"
+
+
+def chunk_document(
+    tokenizer, document: str, chunk_size: int, overlap: int
+) -> list[str]:
+    doc_tokens = tokenizer(document, add_special_tokens=False)["input_ids"]
+    step = max(1, chunk_size - overlap)
+    return [
+        tokenizer.decode(doc_tokens[i : i + chunk_size], skip_special_tokens=True)
+        for i in range(0, len(doc_tokens), step)
+    ]
+
+
+def fits_in_context(
+    tokenizer, document: str, model_ctx: int, reserve_tokens: int
+) -> bool:
+    prompt_overhead = len(
+        tokenizer(PROMPT.format(document=""), add_special_tokens=False)["input_ids"]
+    )
+    doc_len = len(tokenizer(document, add_special_tokens=False)["input_ids"])
+    return doc_len <= model_ctx - prompt_overhead - reserve_tokens
+
+
+def generate_summary(
+    model,
+    tokenizer,
+    document: str,
+    max_new_tokens: int = MIN_SUMMARY_TOKENS,
+    prompt_template: str = PROMPT,
+) -> str:
+    prompt = prompt_template.format(document=document)
+    max_input = model.config.max_position_embeddings - max_new_tokens
     inputs = tokenizer(
-        prompt, return_tensors="pt", truncation=True, max_length=1900
+        prompt, return_tensors="pt", truncation=True, max_length=max_input
     ).to(model.device)
     tokens_in = inputs["input_ids"].shape[1]
     with torch.no_grad():
@@ -74,26 +136,11 @@ def generate_summary(model, tokenizer, document: str, max_new_tokens: int = 150)
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.15,
+            no_repeat_ngram_size=3,
+            prompt_lookup_num_tokens=10,
         )
-    return tokenizer.decode(output[0][tokens_in:], skip_special_tokens=True).strip()
-
-
-def chunk_and_summarize(model, tokenizer, document: str) -> str:
-    max_model_tokens = tokenizer.model_max_length
-    prompt_overhead = len(
-        tokenizer(PROMPT.format(document=""), add_special_tokens=False)["input_ids"]
-    )
-    doc_tokens = tokenizer(document, add_special_tokens=False)["input_ids"]
-
-    if len(doc_tokens) <= max_model_tokens - prompt_overhead - 50:
-        return generate_summary(model, tokenizer, document)
-
-    step = _CHUNK_SIZE - _CHUNK_OVERLAP
-    chunks = [
-        tokenizer.decode(doc_tokens[i : i + _CHUNK_SIZE], skip_special_tokens=True)
-        for i in range(0, len(doc_tokens), step)
-    ]
-
-    partial_summaries = [generate_summary(model, tokenizer, chunk) for chunk in chunks]
-    combined = " ".join(partial_summaries)
-    return generate_summary(model, tokenizer, combined)
+    result = tokenizer.decode(output[0][tokens_in:], skip_special_tokens=True).strip()
+    del inputs, output
+    torch.cuda.empty_cache()
+    return result

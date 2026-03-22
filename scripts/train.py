@@ -3,15 +3,21 @@ from __future__ import annotations
 import math
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")  # 5 min
 os.environ.setdefault(
-    "HF_DATASETS_CACHE",
-    str(Path(__file__).resolve().parents[1] / ".cache" / "datasets"),
+    "HF_HOME",
+    str(Path(__file__).resolve().parents[1] / ".hf-cache"),
 )
 os.environ.setdefault(
-    "TMPDIR", str(Path(__file__).resolve().parents[1] / ".cache" / "tmp")
+    "HF_DATASETS_CACHE",
+    str(Path(__file__).resolve().parents[1] / ".hf-cache" / "datasets"),
+)
+os.environ.setdefault(
+    "TMPDIR", str(Path(__file__).resolve().parents[1] / ".hf-cache" / "tmp")
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -19,16 +25,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, utils
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTConfig, SFTTrainer
-from utils import build_bnb_config, format_example, load_config, load_tokenizer
+from utils import build_bnb_config, format_example, load_config, load_tokenizer, run_dir
 
-from datasets import disable_caching, load_dataset
+from datasets import load_dataset
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-disable_caching()
+utils.enable_progress_bars()
 
 
 def get_latest_checkpoint(output_dir: Path) -> Path | None:
@@ -59,10 +65,6 @@ def build_lora_config(cfg: dict) -> LoraConfig:
     )
 
 
-def _run_dir(model_name: str) -> str:
-    return "runs/" + model_name.split("/")[-1] + "_qlora"
-
-
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
@@ -74,11 +76,85 @@ def main() -> None:
     parser.add_argument(
         "--epochs", type=int, default=None, help="Override number of training epochs"
     )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Limit training to this many rows per epoch (overrides config; default: all rows)",
+    )
+    parser.add_argument(
+        "--shard-offset",
+        type=int,
+        default=None,
+        help="Skip first N shards before loading (overrides config; default: 0)",
+    )
+    parser.add_argument(
+        "--shards",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit shard indices to train on in any order (e.g. --shards 1 3 2); overrides --shard-offset",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=None,
+        help="Skip first N rows within the loaded stream (overrides config; default: 0)",
+    )
+    parser.add_argument(
+        "--max-eval-samples",
+        type=int,
+        default=None,
+        help="Limit validation to this many rows per eval (overrides config; default: all rows)",
+    )
+    parser.add_argument(
+        "--val-shard-offset",
+        type=int,
+        default=None,
+        help="Skip first N val shards before loading (overrides config; default: 0)",
+    )
+    parser.add_argument(
+        "--val-shards",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit val shard indices (e.g. --val-shards 0 1); overrides --val-shard-offset",
+    )
+    parser.add_argument(
+        "--val-offset",
+        type=int,
+        default=None,
+        help="Skip first N rows within the val stream (overrides config; default: 0)",
+    )
     args = parser.parse_args()
 
     model_name = args.model or cfg["model"]["base_model"]
     t = cfg["training"]
     d = cfg["data"]
+
+    max_rows = args.max_rows or d.get("max_rows") or None
+    shard_offset = (
+        args.shard_offset
+        if args.shard_offset is not None
+        else (d.get("shard_offset") or 0)
+    )
+    shards = args.shards or d.get("shards") or None
+    offset = args.offset if args.offset is not None else (d.get("offset") or 0)
+
+    max_eval_samples = (
+        args.max_eval_samples
+        if args.max_eval_samples is not None
+        else (d.get("max_eval_samples") or None)
+    )
+    val_shard_offset = (
+        args.val_shard_offset
+        if args.val_shard_offset is not None
+        else (d.get("val_shard_offset") or 0)
+    )
+    val_shards_explicit = args.val_shards or d.get("val_shards") or None
+    val_offset = (
+        args.val_offset if args.val_offset is not None else (d.get("val_offset") or 0)
+    )
 
     if args.epochs:
         t["num_train_epochs"] = args.epochs
@@ -90,6 +166,7 @@ def main() -> None:
     hub_token = os.environ.get("HF_TOKEN")
     hub_token_arg = hub_token if push_to_hub else None
     hub_model_id_arg = str(hub_model_id) if (push_to_hub and hub_model_id) else None
+    hub_checkpoint_repo_id = f"{hub_model_id}-ckpt" if hub_model_id else None
 
     if push_to_hub:
         if not hub_model_id:
@@ -106,6 +183,12 @@ def main() -> None:
         api = HfApi(token=hub_token)
         api.create_repo(
             repo_id=str(hub_model_id),
+            repo_type="model",
+            exist_ok=True,
+            private=hub_private_repo,
+        )
+        api.create_repo(
+            repo_id=str(hub_checkpoint_repo_id),
             repo_type="model",
             exist_ok=True,
             private=hub_private_repo,
@@ -137,7 +220,15 @@ def main() -> None:
     val_dir = repo_root / d["validation_dir"]
 
     train_shards = sorted(train_dir.glob("*.parquet"))
+    if shards is not None:
+        train_shards = [train_shards[i] for i in shards if i < len(train_shards)]
+    elif shard_offset:
+        train_shards = train_shards[shard_offset:]
     val_shards = sorted(val_dir.glob("*.parquet"))
+    if val_shards_explicit is not None:
+        val_shards = [val_shards[i] for i in val_shards_explicit if i < len(val_shards)]
+    elif val_shard_offset:
+        val_shards = val_shards[val_shard_offset:]
     if not train_shards:
         raise FileNotFoundError(
             f"No parquet shards found in {train_dir}. Run process_datasets.py first."
@@ -149,12 +240,21 @@ def main() -> None:
         split="train",
         streaming=True,
     )
+    if offset:
+        train_ds = train_ds.skip(offset)
+    if max_rows:
+        train_ds = train_ds.take(max_rows)
+
+    _fmt = partial(
+        format_example,
+        tokenizer=tokenizer,
+        max_seq_length=cfg["model"]["max_seq_length"],
+    )
+
     train_ds = train_ds.shuffle(buffer_size=10_000, seed=42).repeat(
         t["num_train_epochs"]
     )
-    train_ds = train_ds.map(
-        format_example, remove_columns=["document", "summary", "source"]
-    )
+    train_ds = train_ds.map(_fmt, remove_columns=["document", "summary", "source"])
 
     val_ds = load_dataset(
         "parquet",
@@ -162,24 +262,34 @@ def main() -> None:
         split="train",
         streaming=True,
     )
-    val_ds = val_ds.map(
-        format_example, remove_columns=["document", "summary", "source"]
-    )
+    if val_offset:
+        val_ds = val_ds.skip(val_offset)
+    if max_eval_samples:
+        val_ds = val_ds.take(max_eval_samples)
+    val_ds = val_ds.map(_fmt, remove_columns=["document", "summary", "source"])
+    if max_eval_samples:
+        from datasets import Dataset as HFDataset
+
+        val_ds = HFDataset.from_list(list(val_ds))
 
     num_rows = sum(pq.ParquetFile(str(p)).metadata.num_rows for p in train_shards)
+    if offset:
+        num_rows = max(0, num_rows - offset)
+    if max_rows:
+        num_rows = min(num_rows, max_rows)
     print(f"Train shards: {len(train_shards)}, val shards: {len(val_shards)}")
     steps_per_epoch = math.ceil(
         num_rows / (t["per_device_train_batch_size"] * t["gradient_accumulation_steps"])
     )
     max_steps = steps_per_epoch * t["num_train_epochs"]
     print(
-        f"Training: {num_rows} rows x {t['num_train_epochs']} epochs = {max_steps} steps"
+        f"Training: {steps_per_epoch} steps/epoch x {t['num_train_epochs']} epochs = {max_steps} steps"
     )
 
     warmup_steps = max(1, int(t.get("warmup_ratio", 0.03) * max_steps))
 
     sft_cfg = SFTConfig(
-        output_dir=str(repo_root / _run_dir(model_name)),
+        output_dir=str(repo_root / run_dir(model_name)),
         dataset_text_field="text",
         max_length=cfg["model"]["max_seq_length"],
         max_steps=max_steps,
@@ -206,7 +316,7 @@ def main() -> None:
         report_to=t["report_to"],
         push_to_hub=push_to_hub,
         hub_strategy=hub_strategy,
-        hub_model_id=hub_model_id_arg,
+        hub_model_id=hub_checkpoint_repo_id,
         hub_private_repo=hub_private_repo,
         hub_token=hub_token_arg,
         gradient_checkpointing_kwargs=t.get("gradient_checkpointing_kwargs", {}),
@@ -215,20 +325,31 @@ def main() -> None:
     resume_cfg = t.get("resume", {})
     if resume_cfg.get("enabled"):
         checkpoint_path = resume_cfg.get("checkpoint_path") or get_latest_checkpoint(
-            repo_root / _run_dir(model_name)
+            repo_root / run_dir(model_name)
         )
         if checkpoint_path:
             sft_cfg.resume_from_checkpoint = checkpoint_path
             print(f"Resuming from local checkpoint: {checkpoint_path}")
-        elif push_to_hub and hub_model_id:
+            state_file = Path(checkpoint_path) / "trainer_state.json"
+            if state_file.exists():
+                import json as _json
+
+                global_step = _json.loads(state_file.read_text())["global_step"]
+                sft_cfg.max_steps = global_step + max_steps
+                print(
+                    f"Adjusted max_steps: {global_step} (checkpoint) + {max_steps} (segment) = {sft_cfg.max_steps}"
+                )
+        elif push_to_hub and hub_checkpoint_repo_id:
             from huggingface_hub import snapshot_download
 
-            print(f"No local checkpoint — downloading from Hub: {hub_model_id}")
-            hub_local = repo_root / _run_dir(model_name) / "hub_checkpoint"
+            print(
+                f"No local checkpoint — downloading from Hub: {hub_checkpoint_repo_id}"
+            )
+            hub_local = repo_root / run_dir(model_name) / "hub_checkpoint"
             snapshot_download(
-                repo_id=hub_model_id,
+                repo_id=hub_checkpoint_repo_id,
                 local_dir=str(hub_local),
-                token=os.environ.get("HF_TOKEN"),
+                token=hub_token,
             )
             checkpoint_subdir = hub_local / "last-checkpoint"
             if checkpoint_subdir.exists():
@@ -252,26 +373,18 @@ def main() -> None:
         print("Training from scratch")
     trainer.train(resume_from_checkpoint=sft_cfg.resume_from_checkpoint or False)
 
-    output_dir = repo_root / _run_dir(model_name) / "final"
+    output_dir = repo_root / run_dir(model_name) / "final"
     trainer.model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
     print(f"Adapter saved to {output_dir}")
 
     if push_to_hub:
-        print("Pushing final adapter to HuggingFace Hub...")
-        commit_info = trainer.push_to_hub(
-            commit_message=(
-                "Final QLoRA adapter: Qwen2.5-3B-Instruct for English summarization "
-                "(CNN/DailyMail + XSum)"
-            ),
-            tags=["peft", "lora", "qlora", "text-summarization", "qwen2"],
-            language=["en"],
-            finetuned_from=model_name,
-            tasks=["summarization"],
-            dataset_tags=["cnn_dailymail", "xsum"],
-            dataset=["cnn_dailymail", "xsum"],
+        api.upload_folder(
+            folder_path=str(output_dir),
+            repo_id=str(hub_model_id_arg),
+            repo_type="model",
         )
-        print(f"Adapter pushed → {commit_info}")
+        print(f"Final adapter pushed → {hub_model_id_arg}")
 
 
 if __name__ == "__main__":

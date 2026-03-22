@@ -7,6 +7,11 @@ import sys
 from pathlib import Path
 from typing import Literal
 
+os.environ.setdefault(
+    "HF_HOME",
+    str(Path(__file__).resolve().parents[1] / ".hf-cache"),
+)
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -29,9 +34,9 @@ def hard_filter(ds: Dataset, num_proc: int = 1) -> tuple[Dataset, int]:
     def keep(ex: dict) -> bool:
         dw = word_count(ex["document"])
         sw = word_count(ex["summary"])
-        if dw < 20 or dw > 1500:
+        if dw < 20 or dw > 10_000:
             return False
-        if sw < 5 or sw > 150:
+        if sw < 5 or sw > 500:
             return False
         if sw >= dw:
             return False
@@ -121,7 +126,7 @@ def save_sharded(
 def process(
     repo_root: Path, rows_per_shard: int = 100_000, min_shards: int = 1
 ) -> None:
-    num_proc = os.cpu_count() or 1
+    num_proc = max(os.cpu_count() // 2, 1)
     print(f"Using num_proc={num_proc}")
 
     datasets_dir = repo_root / "datasets"
