@@ -12,14 +12,6 @@ PROMPT = (
     "Document:\n{document}\n\nSummary:\n"
 )
 
-CHUNK_PROMPT = (
-    "From the following passage, extract only specific facts, discoveries, events, "
-    "and named entities that are unique to this section. "
-    "Skip any repeated descriptions, standard setting details, or boilerplate phrasing. "
-    "Be concise and factual.\n\n"
-    "Passage:\n{document}\n\nKey facts:\n"
-)
-
 REFINE_PROMPT = (
     "You have the following summary so far:\n{existing_summary}\n\n"
     "New section:\n{document}\n\n"
@@ -27,9 +19,6 @@ REFINE_PROMPT = (
     "Keep all previously captured facts. Add new entities, events, and discoveries. "
     "Avoid repeating information already in the summary.\n\nUpdated summary:\n"
 )
-
-REFINE_TOKENS = 1024
-MIN_SUMMARY_TOKENS = 512
 
 
 def format_example(example: dict, tokenizer=None, max_seq_length: int = 0) -> dict:
@@ -96,15 +85,33 @@ def run_dir(model_name: str) -> str:
     return "runs/" + model_name.split("/")[-1] + "_qlora"
 
 
+# -- Old token-based chunking (kept for reference) --
+# def chunk_document(
+#     tokenizer, document: str, chunk_size: int, overlap: int
+# ) -> list[str]:
+#     doc_tokens = tokenizer(document, add_special_tokens=False)["input_ids"]
+#     step = max(1, chunk_size - overlap)
+#     return [
+#         tokenizer.decode(doc_tokens[i : i + chunk_size], skip_special_tokens=True)
+#         for i in range(0, len(doc_tokens), step)
+#     ]
+
+
 def chunk_document(
     tokenizer, document: str, chunk_size: int, overlap: int
 ) -> list[str]:
-    doc_tokens = tokenizer(document, add_special_tokens=False)["input_ids"]
-    step = max(1, chunk_size - overlap)
-    return [
-        tokenizer.decode(doc_tokens[i : i + chunk_size], skip_special_tokens=True)
-        for i in range(0, len(doc_tokens), step)
-    ]
+    from unstructured.chunking.title import chunk_by_title
+    from unstructured.documents.elements import Text
+
+    elements = [Text(text=document)]
+    doc_tokens = len(tokenizer(document, add_special_tokens=False)["input_ids"])
+    chars_per_token = max(1, len(document) / doc_tokens) if doc_tokens > 0 else 4
+    raw_chunks = chunk_by_title(
+        elements,
+        max_characters=int(chunk_size * chars_per_token),
+        overlap=int(overlap * chars_per_token),
+    )
+    return [str(c) for c in raw_chunks if str(c).strip()]
 
 
 def fits_in_context(
@@ -121,7 +128,8 @@ def generate_summary(
     model,
     tokenizer,
     document: str,
-    max_new_tokens: int = MIN_SUMMARY_TOKENS,
+    max_new_tokens: int = 1024,
+    min_new_tokens: int = 64,
     prompt_template: str = PROMPT,
 ) -> str:
     prompt = prompt_template.format(document=document)
@@ -134,6 +142,7 @@ def generate_summary(
         output = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
             repetition_penalty=1.15,
@@ -144,3 +153,10 @@ def generate_summary(
     del inputs, output
     torch.cuda.empty_cache()
     return result
+
+
+def parse_file(path: str) -> str:
+    from unstructured.partition.auto import partition
+
+    elements = partition(filename=path)
+    return "\n\n".join(str(el) for el in elements)

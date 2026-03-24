@@ -21,6 +21,8 @@ dependencies = [
     "yake>=0.4.8",
     "sumy>=0.11.0",
     "nltk>=3.9.0",
+    "unstructured[docx,pdf]>=0.21.5",
+    "unstructured-inference>=1.5.2",
 ]
 
 [tool.uv.sources]

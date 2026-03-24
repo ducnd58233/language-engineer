@@ -31,13 +31,21 @@ def evaluate(
     label: str,
     strategy: str = "hierarchical",
     max_seq_length: int = 1024,
+    min_summary_tokens: int = 64,
+    max_summary_tokens: int = 1024,
 ) -> dict:
     t0 = time.time()
     predictions = []
     for doc in tqdm(documents, desc=f"[{label}/{strategy}] summarizing", unit="doc"):
         predictions.append(
             summarize(
-                model, tokenizer, doc, strategy=strategy, max_seq_length=max_seq_length
+                model,
+                tokenizer,
+                doc,
+                strategy=strategy,
+                max_seq_length=max_seq_length,
+                min_summary_tokens=min_summary_tokens,
+                max_summary_tokens=max_summary_tokens,
             )
         )
     duration = round(time.time() - t0, 1)
@@ -66,6 +74,8 @@ def main(args: argparse.Namespace) -> None:
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
     model_name = args.model or cfg["model"]["base_model"]
     max_seq_length = cfg["model"]["max_seq_length"]
+    min_summary_tokens = cfg["model"].get("min_summary_tokens", 64)
+    max_summary_tokens = cfg["model"].get("max_summary_tokens", 1024)
     bnb_cfg = build_bnb_config(cfg)
 
     test_dir = repo_root / cfg["data"]["test_dir"]
@@ -99,6 +109,8 @@ def main(args: argparse.Namespace) -> None:
             label="base",
             strategy=name,
             max_seq_length=max_seq_length,
+            min_summary_tokens=min_summary_tokens,
+            max_summary_tokens=max_summary_tokens,
         )
     del base_model
     torch.cuda.empty_cache()
@@ -123,6 +135,8 @@ def main(args: argparse.Namespace) -> None:
             label="adapter",
             strategy=name,
             max_seq_length=max_seq_length,
+            min_summary_tokens=min_summary_tokens,
+            max_summary_tokens=max_summary_tokens,
         )
 
         if len(strategies_to_run) > 1:
@@ -166,7 +180,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy",
         choices=list(STRATEGIES) + ["all"],
-        default="hierarchical",
-        help="Summarization strategy (default: hierarchical)",
+        default="extract-abstract",
+        help="Summarization strategy (default: extract-abstract)",
     )
     main(parser.parse_args())

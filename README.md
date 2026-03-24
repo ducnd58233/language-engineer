@@ -1,4 +1,4 @@
-# language-engineer
+# Language-engineer
 
 QLoRA fine-tuning pipeline for document summarization using Qwen2.5-3B-Instruct.
 
@@ -154,7 +154,7 @@ uv run python scripts/evaluate.py [OPTIONS]
 
 ### Step 4 — Inference
 
-Summarizes a single document. Provide either `--document` (inline text) or `--input` (path to a .txt file); these two flags are mutually exclusive. When `--strategy all` is used, pairwise cross-comparison metrics (ROUGE-1/2/L, BLEU-4, BERTScore) are computed between all strategy outputs.
+Summarizes a single document. Supports PDF, DOCX, and TXT input formats. When `--strategy all` is used, pairwise cross-comparison metrics (ROUGE-1/2/L, BLEU-4, BERTScore) are computed between all strategy outputs.
 
 ```bash
 uv run python scripts/inference.py [OPTIONS]
@@ -162,8 +162,7 @@ uv run python scripts/inference.py [OPTIONS]
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
-| --document | str | - | Document text to summarize (mutually exclusive with --input) |
-| --input | str | - | Path to a .txt input file (mutually exclusive with --document) |
+| --input | str | (required) | Path to input file (PDF, DOCX, or TXT) |
 | --output | str | results/inference_result.json (when --strategy all) | Save result to file: .txt writes summary only, .json writes full result with metadata |
 | --adapter | str | runs/Qwen2.5-3B-Instruct_qlora/final | Path to the LoRA adapter directory |
 | --model | str | (from config) | Override base model HF repo ID |

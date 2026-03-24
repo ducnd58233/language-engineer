@@ -15,7 +15,14 @@ os.environ.setdefault(
 sys.path.insert(0, str(Path(__file__).parent))
 
 from strategies import STRATEGIES, summarize
-from utils import build_bnb_config, load_config, load_model, load_tokenizer, run_dir
+from utils import (
+    build_bnb_config,
+    load_config,
+    load_model,
+    load_tokenizer,
+    parse_file,
+    run_dir,
+)
 
 
 def main(args: argparse.Namespace) -> None:
@@ -23,14 +30,10 @@ def main(args: argparse.Namespace) -> None:
     cfg = load_config(repo_root / "configs" / "lora_config.yaml")
     model_name = args.model or cfg["model"]["base_model"]
     max_seq_length = cfg["model"]["max_seq_length"]
+    min_summary_tokens = cfg["model"].get("min_summary_tokens", 64)
+    max_summary_tokens = cfg["model"].get("max_summary_tokens", 1024)
 
-    if args.input:
-        document = Path(args.input).read_text(encoding="utf-8").strip()
-    elif args.document:
-        document = args.document
-    else:
-        print("Error: provide --document or --input", file=sys.stderr)
-        sys.exit(1)
+    document = parse_file(args.input)
 
     tokenizer = load_tokenizer(model_name)
     adapter_path = args.adapter or str(repo_root / run_dir(model_name) / "final")
@@ -48,7 +51,13 @@ def main(args: argparse.Namespace) -> None:
         tokens_in = len(tokenizer(document, add_special_tokens=False)["input_ids"])
         t0 = time.time()
         summary = summarize(
-            model, tokenizer, document, strategy=name, max_seq_length=max_seq_length
+            model,
+            tokenizer,
+            document,
+            strategy=name,
+            max_seq_length=max_seq_length,
+            min_summary_tokens=min_summary_tokens,
+            max_summary_tokens=max_summary_tokens,
         )
         duration = round(time.time() - t0, 1)
         tokens_out = len(tokenizer(summary, add_special_tokens=False)["input_ids"])
@@ -122,9 +131,9 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--document", help="Document text to summarize")
-    group.add_argument("--input", help="Path to input .txt file")
+    parser.add_argument(
+        "--input", required=True, help="Path to input file (PDF, DOCX, or TXT)"
+    )
     parser.add_argument(
         "--output",
         help="Save result to file (.txt = summary only, .json = full result)",
@@ -136,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy",
         choices=list(STRATEGIES) + ["all"],
-        default="hierarchical",
-        help="Summarization strategy (default: hierarchical)",
+        default="extract-abstract",
+        help="Summarization strategy (default: extract-abstract)",
     )
     main(parser.parse_args())
